@@ -4,19 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   clearToken,
-  deleteAgent,
   deleteKbDoc,
   getAgent,
-  getAgentUsage,
   isLoggedIn,
   listKbDocs,
+  resetAgentSystemPrompt,
   testChat,
   toggleKbDoc,
-  updateAgent,
+  updateAgentSystemPrompt,
   uploadKbDoc,
 } from "../../../lib/api";
-
-const AVAILABLE_MODELS = ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"];
 
 export default function AgentDetailPage() {
   const router = useRouter();
@@ -25,6 +22,11 @@ export default function AgentDetailPage() {
 
   const [agent, setAgent] = useState(null);
   const [error, setError] = useState(null);
+  // Bumped every time Configuration is saved (or reset). TestChatPanel
+  // watches this to start a fresh test session and prompt a re-test —
+  // the agent's behavior just changed, so a stale chat history would be
+  // testing against the OLD persona and giving misleading results.
+  const [saveVersion, setSaveVersion] = useState(0);
 
   useEffect(() => {
     if (!isLoggedIn()) {
@@ -49,16 +51,6 @@ export default function AgentDetailPage() {
       });
   }
 
-  async function handleDeleteAgent() {
-    if (!confirm(`Delete "${agent.name}"? This also deletes its knowledge base. This can't be undone.`)) return;
-    try {
-      await deleteAgent(agentId);
-      router.push("/agents");
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
   if (error) {
     return (
       <div className="page">
@@ -79,7 +71,7 @@ export default function AgentDetailPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page agent-detail-page">
       <div className="topbar">
         <div>
           <button className="btn-link" onClick={() => router.push("/agents")}>
@@ -88,44 +80,41 @@ export default function AgentDetailPage() {
           <h1 style={{ marginTop: 8 }}>{agent.name}</h1>
           <div className="sub">slug: {agent.slug}</div>
         </div>
-        <button className="btn-danger" onClick={handleDeleteAgent}>
-          Delete agent
-        </button>
       </div>
 
-      <ConfigPanel agent={agent} onSaved={refresh} />
-      <KnowledgeBasePanel agentId={agentId} />
-      <UsagePanel agentId={agentId} />
-      <TestChatPanel agentId={agentId} />
+      <div className="agent-layout">
+        <div className="agent-layout-left">
+          <ConfigPanel
+            agent={agent}
+            onSaved={() => {
+              refresh();
+              setSaveVersion((v) => v + 1);
+            }}
+          />
+          <KnowledgeBasePanel agentId={agentId} />
+        </div>
+        <div className="agent-layout-right">
+          <TestChatPanel agentId={agentId} saveVersion={saveVersion} />
+        </div>
+      </div>
     </div>
   );
 }
 
 function ConfigPanel({ agent, onSaved }) {
-  const [name, setName] = useState(agent.name);
-  const [description, setDescription] = useState(agent.description || "");
   const [systemPrompt, setSystemPrompt] = useState(agent.system_prompt);
-  const [activeModel, setActiveModel] = useState(agent.active_model);
   const [saving, setSaving] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [error, setError] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
 
-  const dirty =
-    name !== agent.name ||
-    description !== (agent.description || "") ||
-    systemPrompt !== agent.system_prompt ||
-    activeModel !== agent.active_model;
+  const dirty = systemPrompt !== agent.system_prompt;
 
   async function handleSave() {
     setSaving(true);
     setError(null);
     try {
-      await updateAgent(agent.id, {
-        name,
-        description,
-        system_prompt: systemPrompt,
-        active_model: activeModel,
-      });
+      await updateAgentSystemPrompt(agent.id, systemPrompt);
       setSavedAt(new Date());
       onSaved();
     } catch (err) {
@@ -135,34 +124,44 @@ function ConfigPanel({ agent, onSaved }) {
     }
   }
 
+  async function handleReset() {
+    if (!confirm("Revert this agent's playbook to its hardcoded default?")) return;
+    setResetting(true);
+    setError(null);
+    try {
+      const res = await resetAgentSystemPrompt(agent.id);
+      setSystemPrompt(res.system_prompt);
+      setSavedAt(new Date());
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setResetting(false);
+    }
+  }
+
   return (
     <div className="card">
       <h2>Configuration</h2>
       {error && <div className="error-box">{error}</div>}
 
       <label>Name</label>
-      <input type="text" value={name} onChange={(e) => setName(e.target.value)} />
+      <div className="readonly-field">{agent.name}</div>
 
       <label>Description</label>
-      <input type="text" value={description} onChange={(e) => setDescription(e.target.value)} />
+      <div className="readonly-field">{agent.description || "—"}</div>
 
-      <label>Model</label>
-      <select value={activeModel} onChange={(e) => setActiveModel(e.target.value)}>
-        {AVAILABLE_MODELS.map((m) => (
-          <option key={m} value={m}>
-            {m}
-          </option>
-        ))}
-      </select>
-
-      <label>System prompt</label>
-      <textarea rows={12} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
+      <label>Playbook</label>
+      <textarea rows={14} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
 
       <div className="row" style={{ marginTop: 16 }}>
         <button className="btn" onClick={handleSave} disabled={!dirty || saving}>
           {saving ? "Saving…" : "Save changes"}
         </button>
-        {!dirty && savedAt && <span className="saved-tag">Saved</span>}
+        <button className="btn-secondary" onClick={handleReset} disabled={resetting || saving}>
+          {resetting ? "Resetting…" : "Reset to default"}
+        </button>
+        {!dirty && savedAt && <span className="saved-tag">Saved — takes effect on the next message</span>}
       </div>
     </div>
   );
@@ -265,55 +264,88 @@ function KnowledgeBasePanel({ agentId }) {
   );
 }
 
-function UsagePanel({ agentId }) {
-  const [rows, setRows] = useState(null);
-  const [error, setError] = useState(null);
+// The agents reply with lightweight markdown — **bold** for class names,
+// and "• " as an inline bullet separator between schedule items, all
+// inside one plain string with no real newlines (see RULES/prompts in
+// common/config.py). Dumped as raw text, "**Hurricane**" and "•" show up
+// literally instead of rendering — this turns that into actual bold text
+// and a real bullet list. Deliberately NOT a markdown library: the output
+// only ever uses these two constructs, so a full parser is more than
+// this needs.
+function renderMessageContent(text) {
+  const paragraphs = text.split(/\n+/).filter(Boolean);
+  return paragraphs.map((para, pi) => {
+    const bulletParts = para
+      .split(/\s*•\s*/)
+      .map((s) => s.trim())
+      .filter(Boolean);
 
-  useEffect(() => {
-    getAgentUsage(agentId).then(setRows).catch((err) => setError(err.message));
-  }, [agentId]);
-
-  return (
-    <div className="card">
-      <h2>Usage</h2>
-      {error && <div className="error-box">{error}</div>}
-      {rows === null ? (
-        <div className="spinner-text">Loading…</div>
-      ) : rows.length === 0 ? (
-        <div className="empty-state">No requests logged for this agent yet.</div>
-      ) : (
-        <table className="usage-table">
-          <thead>
-            <tr>
-              <th>Model</th>
-              <th>Requests</th>
-              <th>Input tokens</th>
-              <th>Output tokens</th>
-              <th>Est. cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.model}>
-                <td>{r.model}</td>
-                <td>{r.requests}</td>
-                <td>{r.total_input_tokens.toLocaleString()}</td>
-                <td>{r.total_output_tokens.toLocaleString()}</td>
-                <td>${r.estimated_cost_usd.toFixed(4)}</td>
-              </tr>
+    if (bulletParts.length > 1) {
+      const [intro, ...items] = bulletParts;
+      return (
+        <div key={pi}>
+          {intro && <div>{renderBold(intro)}</div>}
+          <ul className="chat-bullets">
+            {items.map((item, i) => (
+              <li key={i}>{renderBold(item)}</li>
             ))}
-          </tbody>
-        </table>
-      )}
-    </div>
+          </ul>
+        </div>
+      );
+    }
+    return <div key={pi}>{renderBold(para)}</div>;
+  });
+}
+
+function renderBold(text) {
+  const segments = text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean);
+  return segments.map((seg, i) =>
+    seg.startsWith("**") && seg.endsWith("**") ? (
+      <strong key={i}>{seg.slice(2, -2)}</strong>
+    ) : (
+      <span key={i}>{seg}</span>
+    )
   );
 }
 
-function TestChatPanel({ agentId }) {
+function TestChatPanel({ agentId, saveVersion }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
+  // Session id returned by the backend on the first message of a test
+  // conversation, sent back on every message after that — without this,
+  // every message would land in a brand-new session and multi-turn
+  // flows (like the booking confirmation "yes/no") could never work.
+  const [sessionId, setSessionId] = useState(null);
+  // True right after a config save, until the next message is actually
+  // sent — drives the banner + pulsing Send button below.
+  const [needsRetest, setNeedsRetest] = useState(false);
+  const isFirstRender = useRef(true);
+  const chatLogRef = useRef(null);
+
+  // Config was just saved (or reset): the agent's behavior changed
+  // mid-conversation, so the old chat history and session are now
+  // testing a persona that no longer exists. Start clean and prompt
+  // the admin to actually verify the change, rather than silently
+  // leaving a stale conversation sitting there.
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    setMessages([]);
+    setSessionId(null);
+    setNeedsRetest(true);
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveVersion]);
+
+  useEffect(() => {
+    if (chatLogRef.current) {
+      chatLogRef.current.scrollTop = chatLogRef.current.scrollHeight;
+    }
+  }, [messages]);
 
   async function handleSend() {
     const text = input.trim();
@@ -323,8 +355,10 @@ function TestChatPanel({ agentId }) {
     setInput("");
     setSending(true);
     try {
-      const res = await testChat(agentId, text);
+      const res = await testChat(agentId, text, sessionId);
+      setSessionId(res.session_id);
       setMessages((m) => [...m, { role: "assistant", content: res.reply }]);
+      setNeedsRetest(false);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -340,24 +374,31 @@ function TestChatPanel({ agentId }) {
   }
 
   return (
-    <div className="card">
+    <div className="card chat-panel">
       <h2>Test chat</h2>
       <div className="sub" style={{ marginBottom: 12 }}>
         Uses a throwaway conversation thread — it never touches real member or staff chat history.
       </div>
-      {error && <div className="error-box">{error}</div>}
-
-      {messages.length > 0 && (
-        <div className="chat-log">
-          {messages.map((m, i) => (
-            <div key={i} className={`chat-msg ${m.role}`}>
-              {m.content}
-            </div>
-          ))}
+      {needsRetest && (
+        <div className="retest-banner">
+          Settings were saved — this started a fresh test session. Send a message to verify the update.
         </div>
       )}
+      {error && <div className="error-box">{error}</div>}
 
-      <div className="row">
+      <div className="chat-log" ref={chatLogRef}>
+        {messages.length === 0 ? (
+          <div className="empty-state">Send a message to start a test conversation.</div>
+        ) : (
+          messages.map((m, i) => (
+            <div key={i} className={`chat-msg ${m.role}`}>
+              {m.role === "assistant" ? renderMessageContent(m.content) : m.content}
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="row chat-input-row">
         <input
           type="text"
           placeholder="Type a test message…"
@@ -366,7 +407,11 @@ function TestChatPanel({ agentId }) {
           onKeyDown={handleKeyDown}
           disabled={sending}
         />
-        <button className="btn" onClick={handleSend} disabled={sending || !input.trim()}>
+        <button
+          className={`btn${needsRetest ? " pulse" : ""}`}
+          onClick={handleSend}
+          disabled={sending || !input.trim()}
+        >
           {sending ? "…" : "Send"}
         </button>
       </div>

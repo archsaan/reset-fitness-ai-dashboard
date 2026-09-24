@@ -28,8 +28,11 @@ export default function LoginPage() {
 
   return (
     <div className="login-wrap">
+      <div className="login-brand">
+        <img src="/logo.png" alt="Reset Fitness" className="login-logo" />
+      </div>
       <div className="card login-card">
-        <h2>Reset Fitness — Admin</h2>
+        <h2>Agent Console</h2>
         {error && <div className="error-box">{error}</div>}
         <form onSubmit={handleSubmit}>
           <label htmlFor="username">Username</label>
