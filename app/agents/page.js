@@ -48,7 +48,7 @@ export default function AgentsPage() {
           </div>
         </div>
          <div className="agents-heading">
-          <h1>Reset Agent Garden</h1>
+          <h1>Reset Agent Hub</h1>
           <div className="sub">
             Each agent has its own playbook, knowledge base, and model.
             {agents && (
@@ -99,6 +99,15 @@ export default function AgentsPage() {
               <div className="slug">whatsapp</div>
               <h3>WhatsApp Agent</h3>
               <div className="desc">Helps Reset Fitness members book classes and get support over WhatsApp.</div>
+            </div>
+            <div className="agent-tile coming-soon">
+              <div className="agent-tile-top">
+                <div className="agent-avatar">S</div>
+                <span className="model-badge coming-soon-badge">Coming soon</span>
+              </div>
+              <div className="slug">sales</div>
+              <h3>Sales Agent</h3>
+              <div className="desc">Helps Reset Fitness convert leads and follow up on membership inquiries.</div>
             </div>
           </div>
         )}
