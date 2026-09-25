@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   clearToken,
+  deleteAgent,
   deleteKbDoc,
   getAgent,
   isLoggedIn,
@@ -51,6 +52,16 @@ export default function AgentDetailPage() {
       });
   }
 
+  async function handleDeleteAgent() {
+    if (!confirm(`Delete "${agent.name}"? This also deletes its knowledge base. This can't be undone.`)) return;
+    try {
+      await deleteAgent(agentId);
+      router.push("/agents");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   if (error) {
     return (
       <div className="page">
@@ -80,6 +91,9 @@ export default function AgentDetailPage() {
           <h1 style={{ marginTop: 8 }}>{agent.name}</h1>
           <div className="sub">slug: {agent.slug}</div>
         </div>
+        <button className="btn-danger" onClick={handleDeleteAgent}>
+          Delete agent
+        </button>
       </div>
 
       <div className="agent-layout">
@@ -125,7 +139,7 @@ function ConfigPanel({ agent, onSaved }) {
   }
 
   async function handleReset() {
-    if (!confirm("Revert this agent's playbook to its hardcoded default?")) return;
+    if (!confirm("Revert this agent's system prompt to its hardcoded default?")) return;
     setResetting(true);
     setError(null);
     try {
@@ -151,7 +165,7 @@ function ConfigPanel({ agent, onSaved }) {
       <label>Description</label>
       <div className="readonly-field">{agent.description || "—"}</div>
 
-      <label>Playbook</label>
+      <label>System prompt</label>
       <textarea rows={14} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
 
       <div className="row" style={{ marginTop: 16 }}>
@@ -308,6 +322,20 @@ function renderBold(text) {
   );
 }
 
+// Must match common/booking_gate.py's CONFIRM_SENTINEL exactly — shared
+// by convention (different language/runtime), not by import. This
+// question text is generated in Python code, not composed by the model
+// (see booking_gate.py's intercept_book_class), so the sentinel is
+// reliably present exactly when a real booking is genuinely pending —
+// safe to key real Yes/No buttons off of, unlike model-authored text.
+const CONFIRM_SENTINEL = "[confirm_buttons]";
+
+function stripConfirmSentinel(text) {
+  const hasConfirmButtons = text.includes(CONFIRM_SENTINEL);
+  const cleaned = text.replace(CONFIRM_SENTINEL, "").trim();
+  return { text: cleaned, hasConfirmButtons };
+}
+
 function TestChatPanel({ agentId, saveVersion }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -347,12 +375,16 @@ function TestChatPanel({ agentId, saveVersion }) {
     }
   }, [messages]);
 
-  async function handleSend() {
-    const text = input.trim();
+  // textOverride lets the Yes/No confirm buttons send a fixed reply
+  // without going through the input box — same call the member's own
+  // typed "yes"/"no" would make, so booking_gate.py's _is_affirmative()
+  // handles it identically either way.
+  async function handleSend(textOverride) {
+    const text = (textOverride ?? input).trim();
     if (!text || sending) return;
     setError(null);
     setMessages((m) => [...m, { role: "user", content: text }]);
-    setInput("");
+    if (textOverride === undefined) setInput("");
     setSending(true);
     try {
       const res = await testChat(agentId, text, sessionId);
@@ -364,6 +396,10 @@ function TestChatPanel({ agentId, saveVersion }) {
     } finally {
       setSending(false);
     }
+  }
+
+  function handleQuickReply(value) {
+    handleSend(value);
   }
 
   function handleKeyDown(e) {
@@ -390,11 +426,44 @@ function TestChatPanel({ agentId, saveVersion }) {
         {messages.length === 0 ? (
           <div className="empty-state">Send a message to start a test conversation.</div>
         ) : (
-          messages.map((m, i) => (
-            <div key={i} className={`chat-msg ${m.role}`}>
-              {m.role === "assistant" ? renderMessageContent(m.content) : m.content}
-            </div>
-          ))
+          messages.map((m, i) => {
+            if (m.role !== "assistant") {
+              return (
+                <div key={i} className={`chat-msg ${m.role}`}>
+                  {m.content}
+                </div>
+              );
+            }
+            const { text, hasConfirmButtons } = stripConfirmSentinel(m.content);
+            // Only the LAST message gets live buttons — once the member
+            // (or admin, here) replies, that pending booking is resolved
+            // one way or another, so an older confirm question showing
+            // clickable buttons again would be stale and misleading.
+            const isLatest = i === messages.length - 1;
+            return (
+              <div key={i} className="chat-msg assistant">
+                {renderMessageContent(text)}
+                {hasConfirmButtons && isLatest && (
+                  <div className="confirm-buttons">
+                    <button
+                      className="btn"
+                      onClick={() => handleQuickReply("yes")}
+                      disabled={sending}
+                    >
+                      Yes, book it
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => handleQuickReply("no")}
+                      disabled={sending}
+                    >
+                      No
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 
@@ -409,7 +478,7 @@ function TestChatPanel({ agentId, saveVersion }) {
         />
         <button
           className={`btn${needsRetest ? " pulse" : ""}`}
-          onClick={handleSend}
+          onClick={() => handleSend()}
           disabled={sending || !input.trim()}
         >
           {sending ? "…" : "Send"}
